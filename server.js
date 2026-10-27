@@ -118,7 +118,7 @@ async function mixar(p, dir) {
   }
   const f = [];
   // voz nivelada
-  f.push("[0:a]" + FMT + ",loudnorm=I=-16:TP=-1.5:LRA=7,aresample=44100[v]");
+  f.push("[0:a]" + FMT + ",loudnorm=I=-16:TP=-1.5:LRA=13,aresample=44100[v]");
   // efeitos em primeiro plano, no tempo certo
   fxIdx.forEach((x, k) => { f.push("[" + x.i + ":a]" + FMT + ",volume=" + FX_DB + "dB,adelay=" + x.ms + "|" + x.ms + "[fx" + k + "]"); });
   const fgIn = "[v]" + fxIdx.map((x, k) => "[fx" + k + "]").join("");
