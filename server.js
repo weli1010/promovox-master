@@ -1,5 +1,6 @@
 // Promovox - servico de masterizacao de musica (ffmpeg)
 // POST /mixar  { voz, musica?, efeitos? } -> MP3 final (voz + musica com abaixamento + efeitos)
+// POST /limpar { url } -> JSON { url, duracao }  (Estudio: limpa o audio do cliente - ruido, silencios, volume - e sobe no Cloudinary)
 // POST /masterizar  { "url": "https://...mp3", "so_volume": true (opcional: so acerta o volume, sem EQ/compressao/reverb) }   header: x-api-key: <MASTER_KEY>
 // Responde com o MP3 tratado (audio/mpeg). GET /health responde ok.
 const http = require("http");
@@ -141,15 +142,45 @@ async function mixar(p, dir) {
   return saida;
 }
 
+// ---------- LIMPEZA do audio do cliente (Estudio): tira ruido e silencios, acerta o volume e sobe no Cloudinary ----------
+async function limpar(url, dir) {
+  const ent = path.join(dir, "in.audio"), sai = path.join(dir, "limpo.mp3");
+  await baixar(url, ent);
+  const af = [
+    "highpass=f=80", "lowpass=f=12000", "afftdn=nf=-28",
+    "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15", "areverse",
+    "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.3", "areverse",
+    "loudnorm=I=-16:TP=-1.5:LRA=11", "aresample=44100"
+  ].join(",");
+  await run("ffmpeg", ["-y", "-i", ent, "-af", af, "-ac", "1", "-c:a", "libmp3lame", "-b:a", "128k", sai]);
+  const dur = await duracao(sai);
+  if (dur < 2) { return { url: null, motivo: "audio vazio ou muito curto depois da limpeza", duracao: dur }; }
+  const fd = new FormData();
+  fd.append("file", new Blob([fs.readFileSync(sai)], { type: "audio/mpeg" }), "limpo.mp3");
+  fd.append("upload_preset", process.env.CLOUDINARY_PRESET || "promovox imagens");
+  const r = await fetch("https://api.cloudinary.com/v1_1/" + (process.env.CLOUDINARY_CLOUD || "dm2vzkval") + "/video/upload", { method: "POST", body: fd });
+  const j = await r.json();
+  if (!j || !j.secure_url) { throw new Error("upload no Cloudinary falhou: " + JSON.stringify(j).slice(0, 200)); }
+  return { url: j.secure_url, duracao: dur };
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") { res.writeHead(200); return res.end("ok"); }
-  if (req.method !== "POST" || (req.url !== "/masterizar" && req.url !== "/mixar")) { res.writeHead(404); return res.end("nao encontrado"); }
+  if (req.method !== "POST" || (req.url !== "/masterizar" && req.url !== "/mixar" && req.url !== "/limpar")) { res.writeHead(404); return res.end("nao encontrado"); }
   if (KEY && req.headers["x-api-key"] !== KEY) { res.writeHead(401); return res.end("chave invalida"); }
   let corpo = "";
   req.on("data", (d) => { corpo += d; if (corpo.length > 20000) { req.destroy(); } });
   req.on("end", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mst-"));
     try {
+      if (req.url === "/limpar") {
+        const { url } = JSON.parse(corpo || "{}");
+        if (!/^https:\/\//.test(String(url || ""))) { res.writeHead(400); return res.end("url invalida"); }
+        const o = await limpar(url, dir);
+        const txt = JSON.stringify(o);
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(txt) });
+        return res.end(txt);
+      }
       if (req.url === "/mixar") {
         const p = JSON.parse(corpo || "{}");
         const ok = (u) => /^https:\/\//.test(String(u || "")) || (process.env.ALLOW_HTTP === "1" && /^http:\/\//.test(String(u || "")));
